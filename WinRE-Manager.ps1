@@ -8,7 +8,7 @@ function Wait-ForExitKey {
     try {
         if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) { return }
         Write-Host ''
-        Write-Host 'Press any key to close...' -ForegroundColor DarkGray
+        Write-Host 'Press any key to finish...' -ForegroundColor DarkGray
         [void][Console]::ReadKey($true)
     } catch {
         # No interactive console (for example, a redirected or unattended run).
@@ -39,6 +39,28 @@ function SizeGiB([int64]$bytes) { '{0:N2} GiB' -f ($bytes / $script:GiB) }
 function Is-Admin {
     $p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+# Prefer UNC paths for mapped drives: elevated sessions may not inherit drive mappings.
+function Resolve-ElevationPath([string]$path) {
+    if ($path -notmatch '^([A-Za-z]):\\') { return $path }
+    $letter = $path.Substring(0, 1)
+    $share = ''
+    $drive = Get-PSDrive -Name $letter -ErrorAction SilentlyContinue
+    if ($drive -and $drive.PSObject.Properties['DisplayRoot'] -and $drive.DisplayRoot -and ([string]$drive.DisplayRoot).StartsWith('\\')) {
+        $share = [string]$drive.DisplayRoot
+    }
+    if (-not $share) {
+        try {
+            $logical = Get-CimInstance -ClassName Win32_LogicalDisk -Filter ("DeviceID='{0}:'" -f $letter) -ErrorAction Stop
+            if ($logical -and $logical.ProviderName) { $share = [string]$logical.ProviderName }
+        } catch {
+            # The original path still works for local drives.
+        }
+    }
+    if ($share -and $share.StartsWith('\\')) {
+        return ($share.TrimEnd('\\') + $path.Substring(2))
+    }
+    return $path
 }
 function Run-External([string]$exe, [string[]]$arguments) {
     & $exe @arguments 2>&1 | Out-Host
@@ -279,12 +301,20 @@ function Set-RecoveryType([int]$number, [string]$style) {
 try {
     if (-not (Is-Admin)) {
         Say 'Administrator rights are required. Requesting elevation...'
-        $elevationArgs = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '"'
-        $elevated = Start-Process -FilePath 'powershell.exe' -ArgumentList $elevationArgs -Verb RunAs -Wait -PassThru -ErrorAction Stop
-        # The elevated instance has already displayed its own closing prompt.
+        if (-not $PSCommandPath -or -not (Test-Path -LiteralPath $PSCommandPath -PathType Leaf)) {
+            throw 'Automatic elevation requires launching a saved .ps1 file.'
+        }
+        # UAC launches a new window. Do not wait or terminate the calling console.
+        $elevationScript = Resolve-ElevationPath $PSCommandPath
+        $elevationDirectory = Resolve-ElevationPath (Get-Location).ProviderPath
+        $elevationArgs = '-NoProfile -ExecutionPolicy Bypass -File "' + $elevationScript + '"'
+        Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') `
+            -ArgumentList $elevationArgs -Verb RunAs `
+            -WorkingDirectory $elevationDirectory -ErrorAction Stop | Out-Null
+        Say 'Elevated PowerShell started. Continue in the new window.'
+        # An existing interactive PowerShell session must remain usable.
+        # A standalone non-elevated PowerShell process can close normally.
         $script:SkipExitPause = $true
-        $global:LASTEXITCODE = $elevated.ExitCode
-        if ($elevated.ExitCode -ne 0) { exit $elevated.ExitCode }
         return
     }
     Import-Module Storage -ErrorAction Stop
@@ -509,4 +539,4 @@ try {
     if (-not $script:SkipExitPause) { Wait-ForExitKey }
 }
 
-if ($script:Failed) { exit 1 }
+if ($script:Failed) { throw 'WinRE-Manager failed; see the error above.' }

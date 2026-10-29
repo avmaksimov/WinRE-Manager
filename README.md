@@ -9,7 +9,7 @@
 
 ## Usage
 
-Keep `WinRE-Manager.cmd` and `WinRE-Manager.ps1` in the same directory and run **`WinRE-Manager.cmd`**. The script requests administrator privileges when necessary and runs without command-line parameters. Both `.ps1` scripts wait for a single keypress at the end (success, cancellation, or error) when an interactive console is available. `WinRE-Manager.cmd` does not add a second pause.
+Run **`WinRE-Manager.ps1`** (right-click → **Run with PowerShell**, or `& '.\WinRE-Manager.ps1'` from a PowerShell console). No script parameters are required. If administrator privileges are missing, it requests UAC and opens a separate elevated PowerShell window; the original interactive console stays open and is not terminated. Both `.ps1` scripts wait for a keypress after finishing when an interactive console is available. On UAC approval, the non-elevated instance exits without an extra pause.
 
 Workflow: **analyze → show a proposed plan → one `Y/N` confirmation → execute**. Any response other than `Y` cancels. There are no log files.
 
@@ -33,7 +33,7 @@ For rebuilding at the end of the disk, the maximum target Recovery size is the c
 ### Safety limits
 
 - Only Windows installed on **C:**; Windows 10/11 and Windows Server 2016 or later, subject to available built-in Windows utilities. Primary target: Windows 11.
-- Basic disk, recognized Recovery partition type, simple adjacent layout, administrator permissions, and a readable existing Recovery partition before destructive operations.
+- Basic disk, recognized Recovery partition type, simple adjacent layout, automatic UAC elevation, and a readable existing Recovery partition before destructive operations.
 - Never deletes unidentified/OEM partitions or custom recovery content. Never reformats D: or moves it.
 - BitLocker-protected or unverifiable system volumes are not modified.
 - The `Winre.wim` image and any required ISO extraction are prepared *before* asking for the final `Y/N`. Temporary files can occupy significant space on C:, even if you later cancel.
@@ -48,7 +48,7 @@ Invoke-WebRequest -Uri ('https://raw.githubusercontent.com/avmaksimov/WinRE-Mana
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\install.ps1'
 ```
 
-`install.ps1` uses `Invoke-WebRequest` (not curl) to download the GitHub source ZIP. The installation destination is the **current PowerShell working directory** (`Get-Location`), even when the installer script is stored elsewhere. Set the desired working directory before running it. It displays the full destination, compares SHA-256 hashes, lists all files alphabetically as `INSTALL` (new), `REPLACE` (changed), or `UNCHANGED` (skipped), and requests one `Y/N` before making changes. Unchanged files are skipped. It stages changed files as `.new` next to their targets, replaces them without preserving old versions, and leaves unrelated files untouched. Temporary download/extraction files are removed; it does not create its own log files. The repository must already be published and publicly accessible for the commands above to work. The installer uses the branch configured in its header.
+`install.ps1` uses `Invoke-WebRequest` (not curl) to download the GitHub source ZIP. The installation destination is the **current PowerShell working directory** (`Get-Location`), even when the installer script is stored elsewhere. Set the desired working directory before running it. It displays the full destination, compares SHA-256 hashes, lists the four managed files alphabetically as `INSTALL` (new), `REPLACE` (changed), or `UNCHANGED` (skipped), and requests one `Y/N` before making changes. Unchanged files are skipped. A `WinRE-Manager.cmd` left by older installations is not deleted automatically; it may be removed manually. It stages changed files as `.new` next to their targets, replaces them without preserving old versions, and leaves unrelated files untouched. Temporary download/extraction files are removed; it does not create its own log files. The repository must already be published and publicly accessible for the commands above to work. The installer uses the branch configured in its header.
 
 ## TODO
 
@@ -67,7 +67,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\install.ps1'
 
 ```text
 WinRE-Manager/
-├── WinRE-Manager.cmd
 ├── WinRE-Manager.ps1
 ├── install.ps1
 ├── README.md

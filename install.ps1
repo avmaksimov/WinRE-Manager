@@ -8,7 +8,7 @@ function Wait-ForExitKey {
     try {
         if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) { return }
         Write-Host ''
-        Write-Host 'Press any key to close...' -ForegroundColor DarkGray
+        Write-Host 'Press any key to finish...' -ForegroundColor DarkGray
         [void][Console]::ReadKey($true)
     } catch {
         # No interactive console (for example, a redirected or unattended run).
@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Stop'
 $owner = 'avmaksimov'
 $repository = 'WinRE-Manager'
 $branch = 'main'
-$files = @('WinRE-Manager.cmd', 'WinRE-Manager.ps1', 'README.md', 'README.ru.md', 'install.ps1') | Sort-Object
+$files = @('WinRE-Manager.ps1', 'README.md', 'README.ru.md', 'install.ps1') | Sort-Object
 $target = (Get-Location).ProviderPath
 $url = "https://github.com/$owner/$repository/archive/refs/heads/$branch.zip"
 # A unique URL and no-cache headers prevent stale repository archives from intermediary caches.
@@ -137,4 +137,4 @@ try {
     }
     Wait-ForExitKey
 }
-if ($failed) { exit 1 }
+if ($failed) { throw 'Installer failed; see the error above.' }
