@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 # WinRE-Manager installer/updater for a public GitHub repository.
 # Downloads with Invoke-WebRequest, compares SHA-256, and asks for one Y/N.
-# Installs repository files (excluding .github/.git metadata), including subfolders.
+# Installs repository files (excluding Git metadata paths), including subfolders.
 # Does not delete unrelated files or create old-version backups or log files.
 
 Set-StrictMode -Version 2.0
@@ -66,7 +66,8 @@ try {
         Get-ChildItem -LiteralPath $sourceRoot -File -Recurse -Force -ErrorAction Stop |
             Where-Object {
                 $relative = $_.FullName.Substring($sourceRoot.Length).TrimStart('\')
-                $relative -notmatch '^(?:\.git|\.github)(?:\\|$)'
+                # Ignore Git-only files and directories at any depth (.git*, e.g. .gitignore, .github/).
+                $relative -notmatch '(?i)(?:^|[\\/])\.git[^\\/]*(?:[\\/]|$)'
             } |
             Sort-Object { $_.FullName.Substring($sourceRoot.Length).TrimStart('\') }
     )
