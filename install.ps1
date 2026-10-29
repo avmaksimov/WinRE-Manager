@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 $owner = 'avmaksimov'
 $repository = 'WinRE-Manager'
 $branch = 'main'
-$files = @('WinRE-Manager.cmd', 'WinRE-Manager.ps1', 'README.md', 'README.ru.md', 'install.ps1')
+$files = @('WinRE-Manager.cmd', 'WinRE-Manager.ps1', 'README.md', 'README.ru.md', 'install.ps1') | Sort-Object
 $target = (Get-Location).ProviderPath
 $url = "https://github.com/$owner/$repository/archive/refs/heads/$branch.zip"
 # A unique URL and no-cache headers prevent stale repository archives from intermediary caches.
@@ -33,6 +33,7 @@ try {
     $roots = @(Get-ChildItem -LiteralPath $extract -Directory)
     if ($roots.Count -ne 1) { throw 'Unexpected ZIP root structure.' }
     $sourceRoot = $roots[0].FullName
+    $entries = @()
     $changes = @()
     $unchangedCount = 0
     foreach ($name in $files) {
@@ -40,13 +41,17 @@ try {
         $to = Join-Path $target $name
         if (-not (Test-Path -LiteralPath $from -PathType Leaf)) { throw "Missing file in ZIP: $name. No files were changed." }
         $newHash = (Get-FileHash -LiteralPath $from -Algorithm SHA256).Hash
-        if (-not (Test-Path -LiteralPath $to -PathType Leaf)) {
-            $changes += [pscustomobject]@{ Name=$name; Source=$from; Target=$to; Hash=$newHash; State='INSTALL' }
+        $state = if (-not (Test-Path -LiteralPath $to -PathType Leaf)) {
+            'INSTALL'
         } elseif ((Get-FileHash -LiteralPath $to -Algorithm SHA256).Hash -ine $newHash) {
-            $changes += [pscustomobject]@{ Name=$name; Source=$from; Target=$to; Hash=$newHash; State='REPLACE' }
+            'REPLACE'
         } else {
-            $unchangedCount++
+            'UNCHANGED'
         }
+        $entry = [pscustomobject]@{ Name=$name; Source=$from; Target=$to; Hash=$newHash; State=$state }
+        $entries += $entry
+        if ($state -eq 'UNCHANGED') { $unchangedCount++ }
+        else { $changes += $entry }
     }
     if ($changes.Count -eq 0) {
         Write-Host 'All files are up to date.' -ForegroundColor Green
@@ -57,20 +62,25 @@ try {
     $replaceCount = @($changes | Where-Object { $_.State -eq 'REPLACE' }).Count
 
     Write-Host ''
-    Write-Host 'INSTALL = new file; REPLACE = existing file with different SHA-256.' -ForegroundColor DarkGray
+    Write-Host 'INSTALL = new; REPLACE = changed; UNCHANGED = identical SHA-256 (skipped).' -ForegroundColor DarkGray
     Write-Host ''
     Write-Host '=== INSTALL/UPDATE SUMMARY ===' -ForegroundColor Cyan
     Write-Host 'Destination: ' -ForegroundColor Gray -NoNewline
     Write-Host $target -ForegroundColor White
     Write-Host ("Changes: {0} to install, {1} to replace; {2} unchanged (skipped)." -f $installCount, $replaceCount, $unchangedCount) -ForegroundColor Gray
     Write-Host ''
-    foreach ($item in $changes) {
-        $stateColor = if ($item.State -eq 'INSTALL') { 'Green' } else { 'Yellow' }
-        Write-Host ("  {0,-9}" -f $item.State) -ForegroundColor $stateColor -NoNewline
-        Write-Host $item.Name -ForegroundColor White
+    foreach ($item in $entries) {
+        $stateColor = switch ($item.State) {
+            'INSTALL' { 'Green' }
+            'REPLACE' { 'Yellow' }
+            default { 'DarkGray' }
+        }
+        Write-Host ("  {0,-11}" -f $item.State) -ForegroundColor $stateColor -NoNewline
+        $nameColor = if ($item.State -eq 'UNCHANGED') { 'DarkGray' } else { 'White' }
+        Write-Host $item.Name -ForegroundColor $nameColor
     }
     Write-Host ''
-    Write-Host 'Only the files listed above will be installed or replaced.' -ForegroundColor Gray
+    Write-Host 'Only INSTALL and REPLACE files will be changed.' -ForegroundColor Gray
     Write-Host 'Other files are retained; no old-version backups are created.' -ForegroundColor Gray
     Write-Host ''
     $choice = (Read-Host 'Apply these changes? [Y/N]').Trim().ToUpperInvariant()
