@@ -86,16 +86,13 @@ try {
             throw "SHA-256 mismatch for $staged; originals were not touched."
         }
     }
+    # The .new file is already in the target directory. Move-Item -Force
+    # replaces an existing file without a separate backup file or Win32 interop.
     foreach ($item in $changes) {
         $staged = $item.Target + '.new'
-        if (Test-Path -LiteralPath $item.Target -PathType Leaf) {
-            # Replace on the same NTFS volume, without a backup file.
-            [IO.File]::Replace($staged, $item.Target, $null)
-        } else {
-            [IO.File]::Move($staged, $item.Target)
-        }
+        Move-Item -LiteralPath $staged -Destination $item.Target -Force -ErrorAction Stop
         $verb = if ($item.State -eq 'INSTALL') { 'Installed' } else { 'Replaced' }
-        Write-Host "${verb}: $($item.Name)"
+        Write-Host "${verb}: $($item.Name)" -ForegroundColor Green
     }
     Write-Host 'Update completed.'
 } catch {
