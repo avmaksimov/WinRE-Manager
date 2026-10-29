@@ -3,6 +3,18 @@
 # Downloads with Invoke-WebRequest, checks SHA-256, and asks for one Y/N.
 # No version backups or deletion of unrelated files.
 
+# Keep the result visible when the script is launched in its own PowerShell window.
+function Wait-ForExitKey {
+    try {
+        if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) { return }
+        Write-Host ''
+        Write-Host 'Press any key to close...' -ForegroundColor DarkGray
+        [void][Console]::ReadKey($true)
+    } catch {
+        # No interactive console (for example, a redirected or unattended run).
+    }
+}
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
@@ -123,5 +135,6 @@ try {
     if (Test-Path -LiteralPath $tempDir) {
         Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
     }
+    Wait-ForExitKey
 }
 if ($failed) { exit 1 }

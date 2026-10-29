@@ -1,4 +1,4 @@
-﻿# WinRE-Manager
+# WinRE-Manager
 
 **WinRE-Manager** is an interactive Windows Recovery Environment (WinRE) repair tool for Windows PowerShell 5.1. It supports basic GPT and MBR disks, searches for an existing `Winre.wim`, and can restore WinRE from a matching Windows installation ISO when necessary.
 
@@ -9,7 +9,7 @@
 
 ## Usage
 
-Keep `WinRE-Manager.cmd` and `WinRE-Manager.ps1` in the same directory and run **`WinRE-Manager.cmd`**. The script requests administrator privileges when necessary and runs without command-line parameters.
+Keep `WinRE-Manager.cmd` and `WinRE-Manager.ps1` in the same directory and run **`WinRE-Manager.cmd`**. The script requests administrator privileges when necessary and runs without command-line parameters. Both `.ps1` scripts wait for a single keypress at the end (success, cancellation, or error) when an interactive console is available. `WinRE-Manager.cmd` does not add a second pause.
 
 Workflow: **analyze → show a proposed plan → one `Y/N` confirmation → execute**. Any response other than `Y` cancels. There are no log files.
 

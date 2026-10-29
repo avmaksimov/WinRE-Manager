@@ -3,6 +3,18 @@
 # Supports simple basic GPT/MBR layouts only. No shrink or partition moves.
 # No log files. Changes to disk only after the final Y/N approval.
 
+# Keep the result visible when the script is launched in its own PowerShell window.
+function Wait-ForExitKey {
+    try {
+        if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) { return }
+        Write-Host ''
+        Write-Host 'Press any key to close...' -ForegroundColor DarkGray
+        [void][Console]::ReadKey($true)
+    } catch {
+        # No interactive console (for example, a redirected or unattended run).
+    }
+}
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $script:MiB = [int64]1048576
@@ -19,6 +31,7 @@ $script:DiskNumber = $null
 $script:Mutated = $false
 $script:Completed = $false
 $script:Failed = $false
+$script:SkipExitPause = $false
 
 function Say([string]$message) { Write-Host $message }
 function SizeMiB([int64]$bytes) { '{0:N0} MiB' -f ($bytes / $script:MiB) }
@@ -266,8 +279,10 @@ function Set-RecoveryType([int]$number, [string]$style) {
 try {
     if (-not (Is-Admin)) {
         Say 'Administrator rights are required. Requesting elevation...'
-        $elevationArgs = '-NoExit -NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '"'
+        $elevationArgs = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '"'
         $elevated = Start-Process -FilePath 'powershell.exe' -ArgumentList $elevationArgs -Verb RunAs -Wait -PassThru -ErrorAction Stop
+        # The elevated instance has already displayed its own closing prompt.
+        $script:SkipExitPause = $true
         $global:LASTEXITCODE = $elevated.ExitCode
         if ($elevated.ExitCode -ne 0) { exit $elevated.ExitCode }
         return
@@ -491,6 +506,7 @@ try {
         }
     }
     if ($script:Failed) { $global:LASTEXITCODE = 1 }
+    if (-not $script:SkipExitPause) { Wait-ForExitKey }
 }
 
 if ($script:Failed) { exit 1 }
