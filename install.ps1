@@ -31,6 +31,7 @@ try {
     if ($roots.Count -ne 1) { throw 'Unexpected ZIP root structure.' }
     $sourceRoot = $roots[0].FullName
     $changes = @()
+    $unchangedCount = 0
     foreach ($name in $files) {
         $from = Join-Path $sourceRoot $name
         $to = Join-Path $target $name
@@ -41,18 +42,34 @@ try {
         } elseif ((Get-FileHash -LiteralPath $to -Algorithm SHA256).Hash -ine $newHash) {
             $changes += [pscustomobject]@{ Name=$name; Source=$from; Target=$to; Hash=$newHash; State='REPLACE' }
         } else {
-            Write-Host "Unchanged: $name"
+            $unchangedCount++
         }
     }
-    if ($changes.Count -eq 0) { Write-Host 'All files are up to date.'; return }
+    if ($changes.Count -eq 0) {
+        Write-Host 'All files are up to date.' -ForegroundColor Green
+        return
+    }
+
+    $installCount = @($changes | Where-Object { $_.State -eq 'INSTALL' }).Count
+    $replaceCount = @($changes | Where-Object { $_.State -eq 'REPLACE' }).Count
 
     Write-Host ''
-    Write-Host '=== INSTALL/UPDATE SUMMARY ==='
-    Write-Host "Destination: $target"
-    foreach ($item in $changes) { Write-Host ("{0,-8} {1}" -f $item.State, $item.Name) }
-    Write-Host 'INSTALL = new file; REPLACE = existing file with different SHA-256.'
-    Write-Host 'Only the files listed above will be installed or replaced.'
-    Write-Host 'Other files are retained; no old-version backups are created.'
+    Write-Host 'INSTALL = new file; REPLACE = existing file with different SHA-256.' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '=== INSTALL/UPDATE SUMMARY ===' -ForegroundColor Cyan
+    Write-Host 'Destination: ' -ForegroundColor Gray -NoNewline
+    Write-Host $target -ForegroundColor White
+    Write-Host ("Changes: {0} to install, {1} to replace; {2} unchanged (skipped)." -f $installCount, $replaceCount, $unchangedCount) -ForegroundColor Gray
+    Write-Host ''
+    foreach ($item in $changes) {
+        $stateColor = if ($item.State -eq 'INSTALL') { 'Green' } else { 'Yellow' }
+        Write-Host ("  {0,-9}" -f $item.State) -ForegroundColor $stateColor -NoNewline
+        Write-Host $item.Name -ForegroundColor White
+    }
+    Write-Host ''
+    Write-Host 'Only the files listed above will be installed or replaced.' -ForegroundColor Gray
+    Write-Host 'Other files are retained; no old-version backups are created.' -ForegroundColor Gray
+    Write-Host ''
     $choice = (Read-Host 'Apply these changes? [Y/N]').Trim().ToUpperInvariant()
     if ($choice -cne 'Y') { Write-Host 'Canceled. No files were replaced.'; return }
 
