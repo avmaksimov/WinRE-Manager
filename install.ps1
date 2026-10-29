@@ -54,6 +54,7 @@ try {
         else { $changes += $entry }
     }
     if ($changes.Count -eq 0) {
+        Write-Host ''
         Write-Host 'All files are up to date.' -ForegroundColor Green
         return
     }
@@ -84,7 +85,11 @@ try {
     Write-Host 'Other files are retained; no old-version backups are created.' -ForegroundColor Gray
     Write-Host ''
     $choice = (Read-Host 'Apply these changes? [Y/N]').Trim().ToUpperInvariant()
-    if ($choice -cne 'Y') { Write-Host 'Canceled. No files were replaced.'; return }
+    if ($choice -cne 'Y') {
+        Write-Host ''
+        Write-Host 'Canceled. No files were replaced.'
+        return
+    }
 
     # Stage all updates alongside destination files before any replacement.
     foreach ($item in $changes) {
@@ -104,9 +109,11 @@ try {
         $verb = if ($item.State -eq 'INSTALL') { 'Installed' } else { 'Replaced' }
         Write-Host "${verb}: $($item.Name)" -ForegroundColor Green
     }
+    Write-Host ''
     Write-Host 'Update completed.'
 } catch {
     $failed = $true
+    Write-Host ''
     Write-Host ('INSTALL ERROR: ' + $_.Exception.Message) -ForegroundColor Red
     Write-Host 'Some files may already have been updated; inspect the output above.' -ForegroundColor Yellow
 } finally {
