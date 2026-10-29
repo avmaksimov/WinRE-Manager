@@ -1,4 +1,4 @@
-# WinRE-Manager
+﻿# WinRE-Manager
 
 **WinRE-Manager** is an interactive Windows Recovery Environment (WinRE) repair tool for Windows PowerShell 5.1. It supports basic GPT and MBR disks, searches for an existing `Winre.wim`, and can restore WinRE from a matching Windows installation ISO when necessary.
 
@@ -44,7 +44,7 @@ For rebuilding at the end of the disk, the maximum target Recovery size is the c
 After publishing the files in `avmaksimov/WinRE-Manager` on branch `main`, download the installer with **Invoke-WebRequest**:
 
 ```powershell
-Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/avmaksimov/WinRE-Manager/main/install.ps1' -OutFile '.\install.ps1' -UseBasicParsing
+Invoke-WebRequest -Uri ('https://raw.githubusercontent.com/avmaksimov/WinRE-Manager/main/install.ps1?cacheBust=' + [guid]::NewGuid().ToString('N')) -Headers @{ 'Cache-Control' = 'no-cache'; 'Pragma' = 'no-cache' } -OutFile '.\install.ps1' -UseBasicParsing
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\install.ps1'
 ```
 

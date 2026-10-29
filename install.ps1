@@ -12,6 +12,9 @@ $branch = 'main'
 $files = @('WinRE-Manager.cmd', 'WinRE-Manager.ps1', 'README.md', 'README.ru.md', 'install.ps1')
 $target = (Get-Location).ProviderPath
 $url = "https://github.com/$owner/$repository/archive/refs/heads/$branch.zip"
+# A unique URL and no-cache headers prevent stale repository archives from intermediary caches.
+$downloadUrl = $url + '?cacheBust=' + [guid]::NewGuid().ToString('N')
+$noCacheHeaders = @{ 'Cache-Control' = 'no-cache'; 'Pragma' = 'no-cache' }
 $tempDir = Join-Path $env:TEMP ('WinRE-Manager-Install-' + [guid]::NewGuid().ToString('N'))
 $zip = Join-Path $tempDir 'source.zip'
 $extract = Join-Path $tempDir 'unpacked'
@@ -24,7 +27,7 @@ try {
     Write-Host "Destination: $target"
     Write-Host 'Downloading repository ZIP with Invoke-WebRequest...'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -ErrorAction Stop
+    Invoke-WebRequest -Uri $downloadUrl -Headers $noCacheHeaders -OutFile $zip -UseBasicParsing -ErrorAction Stop
     if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { throw 'Downloaded ZIP not found.' }
     Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force -ErrorAction Stop
     $roots = @(Get-ChildItem -LiteralPath $extract -Directory)
