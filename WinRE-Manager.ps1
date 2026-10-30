@@ -307,7 +307,57 @@ function Select-IsoIndex([string]$path, [string]$edition, [int]$build, [string]$
     }
     return [int]$selected.Index
 }
+# Optional acceleration: use an existing 7-Zip installation. Never download or bundle it.
+function Find-SevenZip {
+    # Only use the official Program Files installation location.
+    # ProgramW6432 avoids Program Files (x86) from 32-bit PowerShell on 64-bit Windows.
+    $base = if ([Environment]::Is64BitOperatingSystem) {
+        $env:ProgramW6432
+    } else {
+        $env:ProgramFiles
+    }
+    if (-not $base) { return $null }
+    $candidate = Join-Path $base '7-Zip\7z.exe'
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    return $null
+}
+function Try-Extract-SevenZip([string]$source, [int]$index) {
+    $sevenZip = Find-SevenZip
+    if (-not $sevenZip) {
+        Write-Step '7-Zip is not installed. Using Windows DISM.'
+        return
+    }
+    $internalPath = ('{0}\Windows\System32\Recovery\Winre.wim' -f $index)
+    Write-Step 'Extracting Winre.wim directly with installed 7-Zip...'
+    Write-Detail '7-Zip executable' $sevenZip
+    Write-Detail 'Archive entry' $internalPath
+    Write-Detail 'Temporary WinRE' $script:WimFile
+    try {
+        # Use the executable's native console output; do not capture or reformat its progress.
+        & $sevenZip 'e' $source $internalPath ("-o$script:WorkDir") '-y'
+        if ($LASTEXITCODE -ne 0) { throw "7-Zip returned exit code $LASTEXITCODE." }
+        if (-not (Test-Wim $script:WimFile)) { throw 'The extracted Winre.wim is missing or cannot be read by DISM.' }
+        $script:ExtractionMethod = '7-Zip'
+        Write-Step 'Direct WinRE extraction completed.'
+    } catch {
+        Write-Notice ('Direct 7-Zip extraction was unsuccessful: ' + $_.Exception.Message)
+        if (Test-Path -LiteralPath $script:WimFile) {
+            Remove-Item -LiteralPath $script:WimFile -Force -ErrorAction Stop
+        }
+        Write-Step 'Falling back to Windows DISM...'
+    }
+}
 function Extract-IsoWinre([string]$source, [int]$index) {
+    $script:ExtractionMethod = 'DISM'
+    Try-Extract-SevenZip $source $index
+    if ($script:ExtractionMethod -eq '7-Zip') { return }
+
+    # The fallback needs more scratch space than direct extraction.
+    $free = [int64](Get-Volume -DriveLetter C -ErrorAction Stop).SizeRemaining
+    $needed = if ([IO.Path]::GetExtension($source) -ieq '.esd') { 9 * $script:GiB } else { 2 * $script:GiB }
+    if ($free -lt $needed) {
+        throw ("DISM image extraction needs at least {0} free on C:." -f (SizeGiB $needed))
+    }
     $image = $source
     if ([IO.Path]::GetExtension($source) -ieq '.esd') {
         $image = Join-Path $script:WorkDir 'Install-Selected.wim'
@@ -513,6 +563,7 @@ try {
         Write-Detail 'Local Winre.wim' $source 'Green'
         Copy-Item -LiteralPath $source -Destination $script:WimFile -Force -ErrorAction Stop
         $sourceInfo = "local ($source)"
+        $script:ExtractionMethod = 'Local file'
     } else {
         Write-Detail 'Local Winre.wim' 'Not found' 'Yellow'
         Write-Notice 'Mount a Windows installation ISO if it is not already mounted.'
@@ -524,9 +575,6 @@ try {
         if (-not $install) { throw "The ISO on $letter`: does not contain sources\install.wim or install.esd." }
         Write-Detail 'Installation file' $install
         $index = Select-IsoIndex $install $edition $build $arch
-        $free = [int64](Get-Volume -DriveLetter C).SizeRemaining
-        $need = if ($install -like '*.esd') { 9 * $script:GiB } else { 2 * $script:GiB }
-        if ($free -lt $need) { throw "ISO extraction requires at least $(SizeGiB $need) of free space on C:." }
         Extract-IsoWinre $install $index
         $sourceInfo = "ISO $letter`: (index $index)"
     }
@@ -557,6 +605,7 @@ try {
     $tmpLetter = Get-FreeLetter
     Write-Section 'SUMMARY / PROPOSED PLAN'
     Write-Detail 'Image source' $sourceInfo
+    Write-Detail 'Image extraction' $script:ExtractionMethod
     Write-Detail 'Image size' (SizeMiB $imageSize)
     Write-Detail 'Disk capacity' (SizeGiB ([int64]$disk.Size))
     Write-Detail 'C: current' (SizeGiB $os.Size)

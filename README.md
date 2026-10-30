@@ -4,6 +4,8 @@
 
 **[Русская документация](README.ru.md)**
 
+Before requesting confirmation, an existing 7-Zip installation at the official `Program Files\7-Zip\7z.exe` location (both 32-bit and 64-bit Windows) is tried for direct extraction of `Winre.wim` from `install.wim`/`install.esd`. The PATH and `Program Files (x86)` locations are never searched. No external binaries are included or downloaded. If 7-Zip is unavailable or extraction fails validation, Windows DISM is used automatically; DISM may require more temporary disk space. The summary names the extraction method. Both tools retain their native console output.
+
 > [!WARNING]
 > This tool can format or permanently remove a Windows Recovery partition and may extend the system volume C:. **Create a complete disk backup or a verified VM checkpoint before running it.** There is no automatic rollback. Test on a disposable VM before using it on a production computer.
 
