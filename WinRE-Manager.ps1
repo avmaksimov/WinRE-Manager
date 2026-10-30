@@ -32,6 +32,7 @@ $script:Mutated = $false
 $script:Completed = $false
 $script:Failed = $false
 $script:SkipExitPause = $false
+$script:ResultWasReported = $false
 
 function Say([string]$message) { Write-Host $message }
 function Write-Section([string]$label) {
@@ -52,6 +53,33 @@ function Write-Result([string]$message, [bool]$success = $true) {
     Write-Host ''
     if ($success) { Write-Host $message -ForegroundColor Green }
     else { Write-Host $message -ForegroundColor Red }
+    $script:ResultWasReported = $true
+}
+# Ctrl+C stops the PowerShell output pipeline, which may suppress Write-Host
+# in finally. Write directly to the console to make an interrupted run visible.
+function Write-InterruptedNotice {
+    $notice = 'INTERRUPTED: Operation stopped before completion (Ctrl+C).'
+    $warning = 'Check WinRE and disk state before retrying; no rollback is performed.'
+    try {
+        $savedColor = [Console]::ForegroundColor
+        try {
+            [Console]::ForegroundColor = [ConsoleColor]::Red
+            [Console]::Error.WriteLine('')
+            [Console]::Error.WriteLine('=== OPERATION INTERRUPTED ===')
+            [Console]::Error.WriteLine('  ' + $notice)
+            if ($script:Mutated) {
+                [Console]::ForegroundColor = [ConsoleColor]::Yellow
+                [Console]::Error.WriteLine('  ' + $warning)
+            }
+        } finally {
+            [Console]::ForegroundColor = $savedColor
+        }
+    } catch {
+        # Fallback for hosts without a usable System.Console.
+        Write-Host ''
+        Write-Host ('=== ' + $notice + ' ===') -ForegroundColor Red
+        if ($script:Mutated) { Write-Host ('  ' + $warning) -ForegroundColor Yellow }
+    }
 }
 function SizeMiB([int64]$bytes) { '{0:N0} MiB' -f ($bytes / $script:MiB) }
 function SizeGiB([int64]$bytes) { '{0:N2} GiB' -f ($bytes / $script:GiB) }
@@ -624,14 +652,19 @@ try {
     $script:Completed = $true
     Write-Result 'SUCCESS: WinRE restored and the Recovery partition configured.'
 } catch {
-    $script:Failed = $true
-    Write-Section 'ERROR'
-    Write-Host ('  ' + $_.Exception.Message) -ForegroundColor Red
-    Write-Host ''
-    if ($script:Mutated) {
-        Write-Notice 'The disk may have changed. Check its layout before running again.'
+    if ($_.Exception -is [System.Management.Automation.PipelineStoppedException]) {
+        # Ctrl+C may surface as a pipeline-stopped exception. The finally
+        # block prints the same interruption notice as a direct pipeline stop.
+    } else {
+        $script:Failed = $true
+        Write-Section 'ERROR'
+        Write-Host ('  ' + $_.Exception.Message) -ForegroundColor Red
+        Write-Host ''
+        if ($script:Mutated) {
+            Write-Notice 'The disk may have changed. Check its layout before running again.'
+        }
+        Write-Host '  Diagnostics: Get-Partition; reagentc /info' -ForegroundColor Gray
     }
-    Write-Host '  Diagnostics: Get-Partition; reagentc /info' -ForegroundColor Gray
 } finally {
     if ($script:Mounted) {
         try {
@@ -654,7 +687,13 @@ try {
             catch { Write-Warning "Failed to remove temporary directory: $_" }
         }
     }
-    if ($script:Failed) { $global:LASTEXITCODE = 1 }
+    if (-not $script:Failed -and -not $script:ResultWasReported -and -not $script:SkipExitPause) {
+        # Unwinding from Ctrl+C can bypass catch. No normal result was printed.
+        $global:LASTEXITCODE = 130
+        Write-InterruptedNotice
+    } elseif ($script:Failed) {
+        $global:LASTEXITCODE = 1
+    }
     if (-not $script:SkipExitPause) { Wait-ForExitKey }
 }
 
