@@ -34,6 +34,25 @@ $script:Failed = $false
 $script:SkipExitPause = $false
 
 function Say([string]$message) { Write-Host $message }
+function Write-Section([string]$label) {
+    Write-Host ''
+    Write-Host ("=== {0} ===" -f $label) -ForegroundColor Cyan
+}
+function Write-Detail([string]$label, [string]$value, [string]$color = 'White') {
+    Write-Host ("  {0,-17}" -f ($label + ':')) -ForegroundColor Gray -NoNewline
+    Write-Host $value -ForegroundColor $color
+}
+function Write-Notice([string]$message) {
+    Write-Host ("  {0}" -f $message) -ForegroundColor Yellow
+}
+function Write-Step([string]$message) {
+    Write-Host ("  {0}" -f $message) -ForegroundColor White
+}
+function Write-Result([string]$message, [bool]$success = $true) {
+    Write-Host ''
+    if ($success) { Write-Host $message -ForegroundColor Green }
+    else { Write-Host $message -ForegroundColor Red }
+}
 function SizeMiB([int64]$bytes) { '{0:N0} MiB' -f ($bytes / $script:MiB) }
 function SizeGiB([int64]$bytes) { '{0:N2} GiB' -f ($bytes / $script:GiB) }
 function Is-Admin {
@@ -185,26 +204,75 @@ function Find-IsoImage([string]$letter) {
     }
     return $null
 }
+function Get-NormalizedArchitecture([string]$value) {
+    switch -Regex ($value.Trim()) {
+        '^(9|x64|AMD64)$' { return 'x64' }
+        '^(12|ARM64)$' { return 'ARM64' }
+        '^(0|x86|I386)$' { return 'x86' }
+        default { return $value.Trim().ToUpperInvariant() }
+    }
+}
+function Test-SharedWindows11Core([int]$installedBuild, [int]$imageBuild) {
+    # Windows 11 24H2, 25H2 and 26H2 share the 26100 servicing core.
+    return ($installedBuild -in @(26100,26200,26300) -and $imageBuild -in @(26100,26200,26300))
+}
 function Select-IsoIndex([string]$path, [string]$edition, [int]$build, [string]$arch) {
-    $nativeArch = [string]$env:PROCESSOR_ARCHITECTURE
-    if ($env:PROCESSOR_ARCHITEW6432) { $nativeArch = [string]$env:PROCESSOR_ARCHITEW6432 }
-    $expectedArch = if ($nativeArch -match 'ARM64') { @('12','ARM64') } elseif ([Environment]::Is64BitOperatingSystem) { @('9','x64','AMD64') } else { @('0','x86') }
+    # Architecture is detected numerically, not through localized OSArchitecture strings.
+    $expectedArch = Get-NormalizedArchitecture $arch
+    if ($expectedArch -notin @('x64', 'x86', 'ARM64')) {
+        throw "Unsupported processor architecture: $expectedArch."
+    }
     $all = @(Get-WindowsImage -ImagePath $path -ErrorAction Stop)
-    $matches = @()
+    if ($all.Count -eq 0) { throw 'The ISO image catalog is empty.' }
+
+    $rows = @()
+    $matching = @()
     foreach ($img in $all) {
         $detail = Get-WindowsImage -ImagePath $path -Index ([int]$img.ImageIndex) -ErrorAction Stop
-        if ([string]$detail.EditionId -ine $edition) { continue }
+        $imageEdition = [string]$detail.EditionId
+        $imageArch = Get-NormalizedArchitecture ([string]$detail.Architecture)
         $imageVersion = [version]$detail.Version
-        if ($imageVersion.Build -ne $build) { continue }
-        $imageArch = [string]$detail.Architecture
-        if ($imageArch -notin $expectedArch) { continue }
-        $matches += $detail
+        $imageBuild = [int]$imageVersion.Build
+        $editionMatch = ($imageEdition -ieq $edition)
+        $archMatch = ($imageArch -ieq $expectedArch)
+        $exactBuild = ($imageBuild -eq $build)
+        $sharedBuild = Test-SharedWindows11Core $build $imageBuild
+        $rows += [pscustomobject]@{
+            Index=[int]$detail.ImageIndex
+            Edition=$imageEdition
+            Build=$imageBuild
+            Architecture=$imageArch
+            Name=[string]$detail.ImageName
+        }
+        if ($editionMatch -and $archMatch -and ($exactBuild -or $sharedBuild)) {
+            $matching += [pscustomobject]@{
+                Index=[int]$detail.ImageIndex
+                Edition=$imageEdition
+                Build=$imageBuild
+                Architecture=$imageArch
+                Name=[string]$detail.ImageName
+                Exact=$exactBuild
+            }
+        }
     }
-    if ($matches.Count -ne 1) {
-        $all | Select-Object ImageIndex, ImageName | Format-Table -AutoSize | Out-Host
-        throw "Could not uniquely match edition $edition, build $build, architecture $arch (matches: $($matches.Count)). A matching ISO is required."
+    Write-Host ''
+    Write-Host '  Available ISO images:' -ForegroundColor Gray
+    $rows | Sort-Object Index | Format-Table Index, Edition, Build, Architecture, Name -AutoSize | Out-Host
+
+    $exact = @($matching | Where-Object { $_.Exact })
+    $compatible = @($matching | Where-Object { -not $_.Exact })
+    $selected = $null
+    if ($exact.Count -eq 1) { $selected = $exact[0] }
+    elseif ($exact.Count -eq 0 -and $compatible.Count -eq 1) { $selected = $compatible[0] }
+
+    if (-not $selected) {
+        throw "No unique compatible ISO image for edition $edition, OS build $build, architecture $expectedArch (exact: $($exact.Count); shared-core: $($compatible.Count)). Check the ISO metadata above."
     }
-    return [int]$matches[0].ImageIndex
+    Write-Detail 'Selected image' ("index {0}, {1}, build {2}, {3}" -f $selected.Index, $selected.Edition, $selected.Build, $selected.Architecture) 'Green'
+    if (-not $selected.Exact) {
+        Write-Notice ("ISO build {0} differs from installed build {1}; accepted because both use the Windows 11 24H2/25H2/26H2 servicing core." -f $selected.Build, $build)
+    }
+    return [int]$selected.Index
 }
 function Extract-IsoWinre([string]$source, [int]$index) {
     $image = $source
@@ -324,7 +392,8 @@ try {
     $build = [int]$osData.CurrentBuildNumber
     if ($build -lt 14393) { throw 'Windows 10 and Windows Server 2016 or newer are required.' }
     $edition = [string]$osData.EditionID
-    $arch = [string](Get-CimInstance Win32_OperatingSystem).OSArchitecture
+    $processor = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1
+    $arch = Get-NormalizedArchitecture ([string]$processor.Architecture)
     $os = Get-Partition -DriveLetter C -ErrorAction Stop
     $script:DiskNumber = [int]$os.DiskNumber
     $disk = Get-Disk -Number $script:DiskNumber -ErrorAction Stop
@@ -333,13 +402,15 @@ try {
     if ($recoveries.Count -gt 1) { throw 'More than one Recovery partition was found. Automatic changes are blocked.' }
     $old = if ($recoveries.Count -eq 1) { $recoveries[0] } else { $null }
     $state = Get-ReInfo
-    Say '=== WinRE-Manager: ANALYSIS ==='
-    Say "Windows: $edition, build $build, $arch"
-    Say "Disk: $script:DiskNumber ($($disk.PartitionStyle)); C: $(SizeGiB $os.Size)"
-    Say "WinRE: $($state.Status)"
-    Say ('Recovery: ' + $(if ($old) { "partition $($old.PartitionNumber), $(SizeMiB $old.Size)" } else { 'not found' }))
+    Write-Section 'WinRE-MANAGER / ANALYSIS'
+    Write-Detail 'Windows' ("$edition, build $build, $arch")
+    Write-Detail 'System disk' ("$script:DiskNumber ($($disk.PartitionStyle))")
+    Write-Detail 'C' (SizeGiB $os.Size)
+    $statusColor = if ($state.Status -eq 'Enabled') { 'Green' } else { 'Yellow' }
+    Write-Detail 'WinRE' $state.Status $statusColor
+    Write-Detail 'Recovery' $(if ($old) { "partition $($old.PartitionNumber), $(SizeMiB $old.Size)" } else { 'not found' })
     if ($state.Status -eq 'Enabled') {
-        Say 'WinRE is already enabled. No changes are needed.'
+        Write-Result 'WinRE is already enabled. No changes are needed.'
         return
     }
     $layoutMode = Get-LayoutMode $disk $os $old $parts
@@ -350,20 +421,23 @@ try {
     $script:MountDir = Join-Path $script:WorkDir 'Mount'
     $script:WimFile = Join-Path $script:WorkDir 'Winre.wim'
     New-Item -ItemType Directory -Path $script:WorkDir -Force | Out-Null
+    Write-Section 'IMAGE SOURCE'
     $source = Find-Wim $old
     $sourceInfo = $null
     if ($source) {
-        Say "Validated local Winre.wim: $source"
+        Write-Detail 'Local Winre.wim' $source 'Green'
         Copy-Item -LiteralPath $source -Destination $script:WimFile -Force -ErrorAction Stop
         $sourceInfo = "local ($source)"
     } else {
-        Say 'No usable local Winre.wim was found.'
-        Say 'Mount an installation ISO matching this Windows edition and build.'
-        $letter = (Read-Host 'Enter the ISO drive letter (e.g. F), or press Enter to cancel').Trim().ToUpperInvariant()
-        if (-not $letter) { Say 'Canceled. No partitions were changed.'; return }
+        Write-Detail 'Local Winre.wim' 'Not found' 'Yellow'
+        Write-Notice 'Mount a Windows installation ISO if it is not already mounted.'
+        Write-Host ''
+        $letter = (Read-Host 'ISO drive letter (e.g. F; Enter cancels)').Trim().ToUpperInvariant()
+        if (-not $letter) { Write-Result 'Canceled. No partitions were changed.'; return }
         if ($letter -notmatch '^[A-Z]$') { throw 'Enter one drive letter without a colon.' }
         $install = Find-IsoImage $letter
         if (-not $install) { throw "The ISO on $letter`: does not contain sources\install.wim or install.esd." }
+        Write-Detail 'Installation file' $install
         $index = Select-IsoIndex $install $edition $build $arch
         $free = [int64](Get-Volume -DriveLetter C).SizeRemaining
         $need = if ($install -like '*.esd') { 9 * $script:GiB } else { 2 * $script:GiB }
@@ -393,45 +467,51 @@ try {
         [pscustomobject]@{ PartitionNumber=$_.PartitionNumber; Offset=$_.Offset; Size=$_.Size }
     })
     $tmpLetter = Get-FreeLetter
-    Say ''
-    Say '=== SUMMARY: PROPOSED PLAN ==='
-    Say "WinRE status: Disabled; image: $sourceInfo ($(SizeMiB $imageSize))"
-    Say "C: before $(SizeGiB $os.Size) -> after $(SizeGiB $plan.TargetC)"
-    Say ('Recovery before: ' + $(if ($old) { SizeMiB $old.Size } else { 'none' }))
-    Say "Recovery target: $(SizeMiB $plan.Recovery); minimum $(SizeMiB $plan.MinRecovery), maximum $(SizeMiB $plan.MaxRecovery)"
-    Say '1. Try reagentc /enable; finish without repartitioning if it succeeds.'
+    Write-Section 'SUMMARY / PROPOSED PLAN'
+    Write-Detail 'Image source' $sourceInfo
+    Write-Detail 'Image size' (SizeMiB $imageSize)
+    Write-Detail 'C: current' (SizeGiB $os.Size)
+    Write-Detail 'C: proposed' (SizeGiB $plan.TargetC) $(if ($plan.TargetC -gt $os.Size) { 'Yellow' } else { 'White' })
+    Write-Detail 'Recovery current' $(if ($old) { SizeMiB $old.Size } else { 'none' })
+    Write-Detail 'Recovery target' (SizeMiB $plan.Recovery) 'Yellow'
+    Write-Detail 'Required minimum' (SizeMiB $plan.MinRecovery)
+    Write-Host ''
+    Write-Host '  Planned actions:' -ForegroundColor Gray
+    Write-Step '1. Try reagentc /enable; stop without repartitioning if it succeeds.'
     if ($plan.Mode -eq 'InPlace') {
-        Say "2. Keep C: and all later partitions unchanged."
-        Say "3. Reformat existing Recovery partition $($old.PartitionNumber), then restore and enable WinRE."
+        Write-Step '2. Keep C: and later partitions unchanged.'
+        Write-Step ("3. Reformat Recovery partition {0}; restore and enable WinRE." -f $old.PartitionNumber)
     } else {
-        if ($old) { Say "2. Delete existing Recovery partition $($old.PartitionNumber)." }
-        else { Say '2. Use available unallocated space after C:.' }
-        if ($plan.TargetC -gt $os.Size) { Say "3. Extend C: to $(SizeGiB $plan.TargetC) without shrinking it." }
-        Say "4. Create and format $(SizeMiB $plan.Recovery) NTFS Recovery; restore and enable WinRE."
+        if ($old) { Write-Step ("2. Delete Recovery partition {0}." -f $old.PartitionNumber) }
+        else { Write-Step '2. Use unallocated space after C:.' }
+        if ($plan.TargetC -gt $os.Size) { Write-Step ("3. Extend C: to {0} (no shrinking)." -f (SizeGiB $plan.TargetC)) }
+        Write-Step ("4. Create and format {0} NTFS Recovery; restore WinRE." -f (SizeMiB $plan.Recovery))
     }
-    Say 'Execution stops at the first error; no alternative partition plan will run.'
-    Say 'WARNING: Recovery content will be permanently destroyed if repair is required.'
-    Say 'WARNING: Create a full disk backup or a validated VM checkpoint before continuing.'
-    Say 'No WinRE or partition settings were changed during analysis.'
-    Say ''
+    Write-Section 'SAFETY'
+    Write-Notice 'Any existing Recovery content will be permanently deleted if repair is required.'
+    Write-Notice 'Create a complete disk backup or verified VM checkpoint before continuing.'
+    Write-Host '  No partition or WinRE configuration changes were made during analysis.' -ForegroundColor DarkGray
+    Write-Host '  Execution stops on the first error; there is no automatic rollback.' -ForegroundColor DarkGray
+    Write-Host ''
     $decision = (Read-Host 'Apply this plan? [Y/N]').Trim().ToUpperInvariant()
-    if ($decision -cne 'Y') { Say 'Canceled. No system settings were changed.'; return }
+    if ($decision -cne 'Y') { Write-Result 'Canceled. No system settings were changed.'; return }
 
+    Write-Section 'EXECUTION'
     Assert-StillSame $os $old $identity
     Assert-DiskLayoutSnapshot $partitionSnapshot
-    Say 'Trying the standard reagentc /enable...'
+    Write-Step 'Trying the standard reagentc /enable...'
     & reagentc.exe /enable 2>&1 | Out-Host
     $code = $LASTEXITCODE
     $nowState = Get-ReInfo
     if ($code -eq 0 -and $nowState.Status -eq 'Enabled') {
-        Say 'SUCCESS: WinRE enabled without repartitioning.'
+        Write-Result 'SUCCESS: WinRE enabled without repartitioning.'
         $script:Completed = $true
         return
     }
     if ($nowState.Status -eq 'Enabled') {
         throw 'reagentc returned an error but WinRE now reports Enabled. Manual inspection is required.'
     }
-    Say 'Standard WinRE enable failed. Executing the approved recovery plan.'
+    Write-Notice 'Standard WinRE enable failed. Executing the approved recovery plan.'
     Assert-StillSame $os $old $identity
     Assert-DiskLayoutSnapshot $partitionSnapshot
     if ($plan.Mode -eq 'InPlace') {
@@ -505,14 +585,16 @@ try {
     }
     Say $final.Output
     $script:Completed = $true
-    Say 'SUCCESS: WinRE restored and the Recovery partition configured.'
+    Write-Result 'SUCCESS: WinRE restored and the Recovery partition configured.'
 } catch {
     $script:Failed = $true
-    Write-Host ('ERROR: ' + $_.Exception.Message) -ForegroundColor Red
+    Write-Section 'ERROR'
+    Write-Host ('  ' + $_.Exception.Message) -ForegroundColor Red
+    Write-Host ''
     if ($script:Mutated) {
-        Write-Host 'The disk may have changed. Check the layout before running again.' -ForegroundColor Yellow
+        Write-Notice 'The disk may have changed. Check its layout before running again.'
     }
-    Write-Host 'Inspect Get-Partition, reagentc /info and the actual disk layout.' -ForegroundColor Yellow
+    Write-Host '  Diagnostics: Get-Partition; reagentc /info' -ForegroundColor Gray
 } finally {
     if ($script:Mounted) {
         try {
