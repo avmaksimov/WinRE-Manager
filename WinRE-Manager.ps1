@@ -218,6 +218,7 @@ function Get-RecoveryRoot($part) {
     return $null
 }
 function Find-Wim($part) {
+    Write-Step 'Checking local WinRE images...'
     $candidates = New-Object 'System.Collections.Generic.List[string]'
     $candidates.Add((Join-Path $env:windir 'System32\Recovery\Winre.wim'))
     $candidates.Add((Join-Path ($env:SystemDrive + '\') 'Recovery\WindowsRE\Winre.wim'))
@@ -227,7 +228,20 @@ function Find-Wim($part) {
         $candidates.Add((Join-Path $root 'Winre.wim'))
     }
     foreach ($path in @($candidates | Select-Object -Unique)) {
-        if (Test-Wim $path) { return $path }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            Write-Host ('    {0,-11} {1}' -f 'NOT FOUND', $path) -ForegroundColor DarkGray
+            continue
+        }
+        if (Test-Wim $path) {
+            Write-Host ('    {0,-11} {1}' -f 'VALID', $path) -ForegroundColor Green
+            return $path
+        }
+        Write-Host ('    {0,-11} {1}' -f 'INVALID', $path) -ForegroundColor Yellow
+    }
+    if (-not $part) {
+        Write-Host '    NOT PRESENT Recovery partition' -ForegroundColor DarkGray
+    } elseif (-not $root) {
+        Write-Host '    UNAVAILABLE Recovery partition (volume path not accessible)' -ForegroundColor Yellow
     }
     return $null
 }
@@ -626,6 +640,7 @@ try {
     New-Item -ItemType Directory -Path $script:WorkDir -Force | Out-Null
     Write-Section 'IMAGE SOURCE'
     $source = Find-Wim $old
+    Write-Host ''
     $sourceInfo = $null
     if ($source) {
         Write-Detail 'Local Winre.wim' $source 'Green'
@@ -633,8 +648,8 @@ try {
         $sourceInfo = "local ($source)"
         $script:ExtractionMethod = 'Local file'
     } else {
-        Write-Detail 'Local Winre.wim' 'Not found' 'Yellow'
-        Write-Notice 'Mount a Windows installation ISO if it is not already mounted.'
+        Write-Detail 'Local Winre.wim' 'No usable image found' 'Yellow'
+        Write-Notice 'Installation ISO is required. Mount a matching Windows ISO.'
         Write-Host ''
         $letter = (Read-Host 'ISO drive letter (e.g. F; Enter cancels)').Trim().ToUpperInvariant()
         if (-not $letter) { Write-Result 'Canceled. No partitions were changed.'; return }
