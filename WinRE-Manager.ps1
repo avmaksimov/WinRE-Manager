@@ -288,7 +288,7 @@ function Select-IsoIndex([string]$path, [string]$edition, [int]$build, [string]$
     }
     Write-Host ''
     Write-Host '  Available ISO images:' -ForegroundColor Gray
-    $rows | Sort-Object Index | Format-Table Index, Edition, Build, Architecture, Name -AutoSize | Out-Host
+    $rows | Sort-Object Index | Format-Table Index, Edition, Build, @{ Label = 'Architecture'; Expression = { $_.Architecture }; Alignment = 'Center' }, Name -AutoSize | Out-Host
 
     $exact = @($matching | Where-Object { $_.Exact })
     $compatible = @($matching | Where-Object { -not $_.Exact })
