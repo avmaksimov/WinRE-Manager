@@ -36,7 +36,7 @@ For rebuilding at the end of the disk, the maximum target Recovery size is the c
 - Basic disk, recognized Recovery partition type, simple adjacent layout, automatic UAC elevation, and a readable existing Recovery partition before destructive operations.
 - Never deletes unidentified/OEM partitions or custom recovery content. Never reformats D: or moves it.
 - BitLocker-protected or unverifiable system volumes are not modified.
-- The `Winre.wim` image and any required ISO extraction are prepared *before* asking for the final `Y/N`. Temporary files are stored under `%WINDIR%\Temp\WinRE-Manager-<GUID>`, with the full WIM path displayed before export. DISM progress is shown as a single updating PowerShell progress indicator. Temporary files can occupy significant space on C:, even if you later cancel.
+- The `Winre.wim` image and any required ISO extraction are prepared *before* asking for the final `Y/N`. Temporary files are stored under `%WINDIR%\Temp\WinRE-Manager-<GUID>`, with the full WIM path displayed before export. DISM displays its native console progress directly, without any PowerShell progress wrapper. Temporary files can occupy significant space on C:, even if you later cancel.
 - If a failure occurs **after** destructive changes, the script stops and preserves the staged `Winre.wim` for manual recovery; it does not automatically undo disk operations.
 - If you interrupt the operation with **Ctrl+C**, the script tries to clean up temporary resources and displays a prominent red **OPERATION INTERRUPTED** status instead of silently showing only the final keypress prompt. If partition changes were started, inspect disk and WinRE state before retrying. A forced process termination cannot guarantee cleanup or an interruption message.
 

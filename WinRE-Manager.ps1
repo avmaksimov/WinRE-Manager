@@ -109,43 +109,12 @@ function Resolve-ElevationPath([string]$path) {
     }
     return $path
 }
+# Let native console tools render their own progress and diagnostics.
+# Do not pipe their output through PowerShell unless it must be parsed.
 function Run-External([string]$exe, [string[]]$arguments) {
-    & $exe @arguments 2>&1 | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw ("$exe failed with exit code $LASTEXITCODE.") }
-}
-# DISM writes a full console progress bar on each update when piped through
-# PowerShell. Consume those lines and replace them with one Write-Progress view.
-# Keep diagnostic messages in memory and display them if DISM fails; no log file.
-function Run-DismWithProgress([string[]]$arguments, [string]$activity) {
-    $diagnostics = New-Object 'System.Collections.Generic.List[string]'
-    $exitCode = $null
-    Write-Progress -Id 1 -Activity $activity -Status 'Starting...' -PercentComplete 0
-    try {
-        & dism.exe @arguments 2>&1 | ForEach-Object {
-            foreach ($fragment in (([string]$_) -split '[\r\n]+')) {
-                $line = $fragment.Trim()
-                if (-not $line) { continue }
-                $match = [regex]::Match($line, '^\[[=\s]*(\d{1,3}(?:[.,]\d+)?)%[=\s]*\]$')
-                if ($match.Success) {
-                    $percent = [double]::Parse($match.Groups[1].Value.Replace(',', '.'), [Globalization.CultureInfo]::InvariantCulture)
-                    $percent = [math]::Max(0, [math]::Min(100, $percent))
-                    Write-Progress -Id 1 -Activity $activity -Status ('{0:0.0}%' -f $percent) -PercentComplete ([int][math]::Floor($percent))
-                    continue
-                }
-                $diagnostics.Add($line)
-                if ($diagnostics.Count -gt 30) { $diagnostics.RemoveAt(0) }
-            }
-        }
-        $exitCode = $LASTEXITCODE
-    } finally {
-        Write-Progress -Id 1 -Activity $activity -Completed
-    }
-    if ($exitCode -ne 0) {
-        Write-Host ''
-        Write-Notice 'DISM diagnostic output:'
-        foreach ($line in $diagnostics) { Write-Host ("  $line") -ForegroundColor Gray }
-        throw ("DISM failed during $activity (exit code $exitCode).")
-    }
+    & $exe @arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) { throw ("$exe failed with exit code $exitCode.") }
 }
 function Run-DiskPart([string[]]$commands) {
     $name = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N') + '.txt')
@@ -342,19 +311,19 @@ function Extract-IsoWinre([string]$source, [int]$index) {
         $image = Join-Path $script:WorkDir 'Install-Selected.wim'
         Write-Step 'Exporting selected install.esd image...'
         Write-Detail 'Temporary WIM' $image
-        Run-DismWithProgress @('/English', '/Export-Image', "/SourceImageFile:$source", "/SourceIndex:$index", "/DestinationImageFile:$image", '/Compress:max', '/CheckIntegrity') 'Exporting installation image'
+        Run-External 'dism.exe' @('/English', '/Export-Image', "/SourceImageFile:$source", "/SourceIndex:$index", "/DestinationImageFile:$image", '/Compress:max', '/CheckIntegrity')
         Write-Step 'Image export completed.'
         $index = 1
     }
     New-Item -ItemType Directory -Path $script:MountDir -Force | Out-Null
     Write-Step 'Mounting installation image read-only...'
-    Run-DismWithProgress @('/English','/Mount-Image',"/ImageFile:$image","/Index:$index","/MountDir:$script:MountDir",'/ReadOnly') 'Mounting installation image'
+    Run-External 'dism.exe' @('/English','/Mount-Image',"/ImageFile:$image","/Index:$index","/MountDir:$script:MountDir",'/ReadOnly')
     $script:Mounted = $true
     $inside = Join-Path $script:MountDir 'Windows\System32\Recovery\Winre.wim'
     if (-not (Test-Path -LiteralPath $inside -PathType Leaf)) { throw 'The installation image does not contain Winre.wim.' }
     Copy-Item -LiteralPath $inside -Destination $script:WimFile -Force -ErrorAction Stop
     Write-Step 'Unmounting installation image...'
-    Run-DismWithProgress @('/English','/Unmount-Image',"/MountDir:$script:MountDir",'/Discard') 'Unmounting installation image'
+    Run-External 'dism.exe' @('/English','/Unmount-Image',"/MountDir:$script:MountDir",'/Discard')
     $script:Mounted = $false
 }
 function Make-Plan($disk, $os, [int64]$minSize) {
@@ -565,7 +534,7 @@ try {
     Assert-StillSame $os $old $identity
     Assert-DiskLayoutSnapshot $partitionSnapshot
     Write-Step 'Trying the standard reagentc /enable...'
-    & reagentc.exe /enable 2>&1 | Out-Host
+    & reagentc.exe /enable
     $code = $LASTEXITCODE
     $nowState = Get-ReInfo
     if ($code -eq 0 -and $nowState.Status -eq 'Enabled') {
@@ -668,7 +637,7 @@ try {
 } finally {
     if ($script:Mounted) {
         try {
-            Run-DismWithProgress @('/English','/Unmount-Image',"/MountDir:$script:MountDir",'/Discard') 'Cleaning up mounted image'
+            Run-External 'dism.exe' @('/English','/Unmount-Image',"/MountDir:$script:MountDir",'/Discard')
             $script:Mounted = $false
         } catch { Write-Warning "Failed to unmount the temporary DISM image: $_" }
     }
