@@ -25,7 +25,9 @@ $script:WorkDir = $null
 $script:MountDir = $null
 $script:WimFile = $null
 $script:Mounted = $false
-$script:TempLetter = $null
+$script:MountAccessPath = $null
+$script:MountAccessAssigned = $false
+$script:MountAccessPartNumber = $null
 $script:NewPartNumber = $null
 $script:DiskNumber = $null
 $script:Mutated = $false
@@ -84,6 +86,12 @@ function Write-InterruptedNotice {
 }
 function SizeMiB([int64]$bytes) { '{0:N0} MiB' -f ($bytes / $script:MiB) }
 function SizeGiB([int64]$bytes) { '{0:N2} GiB' -f ($bytes / $script:GiB) }
+function SizeGiBWithNtfsMargin([int64]$bytes) {
+    if (($bytes % $script:GiB) -eq $script:MiB) {
+        return ('{0:N0} GiB + 1 MiB' -f ([math]::Floor($bytes / $script:GiB)))
+    }
+    return (SizeGiB $bytes)
+}
 function Is-Admin {
     $p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -139,13 +147,51 @@ function Is-RecoveryPartition($part, [string]$style) {
     $mbr = if ($part.PSObject.Properties['MbrType']) { [string]$part.MbrType } else { '' }
     return (($type -ieq 'Recovery') -or ($type -ieq '0x27') -or ($mbr -ieq 'Recovery'))
 }
-function Get-FreeLetter {
-    foreach ($letter in @('R','S','T','U','V','W','Y','Z')) {
-        if (-not (Test-Path ("$letter`:")) -and @((Get-Partition | Where-Object { [string]$_.DriveLetter -ieq $letter })).Count -eq 0) {
-            return $letter
-        }
+# Mount the Recovery volume into an empty NTFS directory, never a drive letter.
+# The mount directory lives OUTSIDE WorkDir so recursive cleanup can never
+# descend into Recovery if Windows refuses to detach the mount point.
+function Open-RecoveryMount([int]$number) {
+    if ($script:MountAccessAssigned) { throw 'A Recovery mount point is already active.' }
+    if ([string](Get-Volume -DriveLetter C -ErrorAction Stop).FileSystem -ine 'NTFS') {
+        throw 'Recovery folder mount points require an NTFS system volume.'
     }
-    throw 'No free temporary drive letter (R,S,T,U,V,W,Y,Z).'
+    $script:MountAccessPath = Join-Path $env:windir ('Temp\WinRE-Manager-Mount-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $script:MountAccessPath -ErrorAction Stop | Out-Null
+    if (@(Get-ChildItem -LiteralPath $script:MountAccessPath -Force -ErrorAction Stop).Count -ne 0) {
+        throw 'Recovery mount directory must be empty.'
+    }
+    # Set this before attaching so cleanup knows which partition to inspect.
+    $script:MountAccessPartNumber = $number
+    # Assume attachment may have partially succeeded even if the cmdlet errors.
+    # In that case, cleanup must NOT delete the directory until detached.
+    $script:MountAccessAssigned = $true
+    Add-PartitionAccessPath -DiskNumber $script:DiskNumber -PartitionNumber $number `
+        -AccessPath $script:MountAccessPath -ErrorAction Stop
+    $mountItem = Get-Item -LiteralPath $script:MountAccessPath -Force -ErrorAction Stop
+    if (($mountItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+        throw 'The temporary directory did not become a volume mount point.'
+    }
+    Write-Detail 'Temporary mount' $script:MountAccessPath
+}
+function Close-RecoveryMount {
+    if (-not $script:MountAccessPath) { return }
+    if ($script:MountAccessAssigned) {
+        Remove-PartitionAccessPath -DiskNumber $script:DiskNumber `
+            -PartitionNumber $script:MountAccessPartNumber `
+            -AccessPath $script:MountAccessPath -ErrorAction Stop
+        $script:MountAccessAssigned = $false
+    }
+    # An NTFS junction/mount point must be detached BEFORE deleting its folder.
+    # Avoid Remove-Item -Recurse here under any circumstances.
+    if (Test-Path -LiteralPath $script:MountAccessPath -PathType Container) {
+        $mountItem = Get-Item -LiteralPath $script:MountAccessPath -Force -ErrorAction Stop
+        if (($mountItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The Recovery mount directory is still a reparse point; leaving it untouched.'
+        }
+        [IO.Directory]::Delete($script:MountAccessPath, $false)
+    }
+    $script:MountAccessPath = $null
+    $script:MountAccessPartNumber = $null
 }
 function Test-Wim([string]$path) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
@@ -390,8 +436,14 @@ function Make-Plan($disk, $os, [int64]$minSize) {
     $maxC = [int64]($end - $os.Offset - $minSize)
     $roundedC = [int64]([math]::Floor($maxC / $script:GiB) * $script:GiB)
     $targetC = [int64]$os.Size
-    # Never shrink C: and never extend to a non-round figure.
-    if ($roundedC -gt $targetC -and ($roundedC - $targetC) -ge $script:MiB) { $targetC = $roundedC }
+    # NTFS reports a volume size about one cluster smaller than its partition.
+    # An exact 65 GiB partition appeared as 64.9 GiB in Explorer in our test.
+    # Add 1 MiB when possible so Explorer can display a whole-GiB capacity.
+    # Never shrink C:, and never exceed the space left for minimum Recovery.
+    $preferredC = [int64]($roundedC + $script:MiB)
+    if ($preferredC -gt $targetC -and $preferredC -le $maxC) {
+        $targetC = $preferredC
+    }
     $capacity = [int64]($end - $os.Offset - $targetC)
     $maxRecovery = [int64]($minSize + $script:GiB)
     $targetRecovery = [int64]([math]::Floor(([math]::Min($capacity,$maxRecovery)) / $script:MiB) * $script:MiB)
@@ -497,7 +549,23 @@ function Set-RecoveryType([int]$number, [string]$style) {
     }
     $checked = Get-Partition -DiskNumber $script:DiskNumber -PartitionNumber $number
     if (-not (Is-RecoveryPartition $checked $style)) { throw 'Failed to set the Recovery partition type.' }
-    if ($style -eq 'GPT' -and -not $checked.NoDefaultDriveLetter) { throw 'GPT NoDefaultDriveLetter attribute was not set.' }
+    if ($style -eq 'GPT') {
+        # Get-Partition.NoDefaultDriveLetter can be null on a correctly configured
+        # recovery volume. Inspect the actual GPT attribute via DiskPart instead.
+        $probeFile = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N') + '.txt')
+        [IO.File]::WriteAllLines($probeFile, @(
+            "select disk $script:DiskNumber", "select partition $number", 'detail partition'
+        ), [Text.Encoding]::ASCII)
+        try {
+            $probe = (& diskpart.exe /s $probeFile 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0) { throw 'DiskPart could not read Recovery GPT attributes.' }
+            if ($probe -notmatch '(?i)0x8000000000000001') {
+                throw 'The Recovery GPT attributes differ from 0x8000000000000001.'
+            }
+        } finally {
+            Remove-Item -LiteralPath $probeFile -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 try {
@@ -602,14 +670,13 @@ try {
     $partitionSnapshot = @($parts | ForEach-Object {
         [pscustomobject]@{ PartitionNumber=$_.PartitionNumber; Offset=$_.Offset; Size=$_.Size }
     })
-    $tmpLetter = Get-FreeLetter
     Write-Section 'SUMMARY / PROPOSED PLAN'
     Write-Detail 'Image source' $sourceInfo
     Write-Detail 'Image extraction' $script:ExtractionMethod
     Write-Detail 'Image size' (SizeMiB $imageSize)
     Write-Detail 'Disk capacity' (SizeGiB ([int64]$disk.Size))
     Write-Detail 'C: current' (SizeGiB $os.Size)
-    Write-Detail 'C: proposed' (SizeGiB $plan.TargetC) $(if ($plan.TargetC -gt $os.Size) { 'Yellow' } else { 'White' })
+    Write-Detail 'C: proposed' (SizeGiBWithNtfsMargin $plan.TargetC) $(if ($plan.TargetC -gt $os.Size) { 'Yellow' } else { 'White' })
     Write-Detail 'Recovery current' $(if ($old) { SizeMiB $old.Size } else { 'none' })
     Write-Detail 'Recovery target' (SizeMiB $plan.Recovery) 'Yellow'
     Write-Detail 'Required minimum' (SizeMiB $plan.MinRecovery)
@@ -619,14 +686,15 @@ try {
     }
     Write-Host ''
     Write-Host '  Planned actions:' -ForegroundColor Gray
-    Write-Step '1. Try reagentc /enable; stop without repartitioning if it succeeds.'
+    if ($old) { Write-Step '1. Try reagentc /enable; stop without repartitioning if it succeeds.' }
+    else { Write-Step '1. No Recovery partition exists; create one without re-enabling WinRE on C:.' }
     if ($plan.Mode -eq 'InPlace') {
         Write-Step '2. Keep C: and later partitions unchanged.'
         Write-Step ("3. Reformat Recovery partition {0}; restore and enable WinRE." -f $old.PartitionNumber)
     } else {
         if ($old) { Write-Step ("2. Delete Recovery partition {0}." -f $old.PartitionNumber) }
         else { Write-Step '2. Use unallocated space after C:.' }
-        if ($plan.TargetC -gt $os.Size) { Write-Step ("3. Extend C: to {0} (no shrinking)." -f (SizeGiB $plan.TargetC)) }
+        if ($plan.TargetC -gt $os.Size) { Write-Step ("3. Extend C: to {0} (no shrinking)." -f (SizeGiBWithNtfsMargin $plan.TargetC)) }
         Write-Step ("4. Create and format {0} NTFS Recovery; restore WinRE." -f (SizeMiB $plan.Recovery))
     }
     Write-Section 'SAFETY'
@@ -641,32 +709,37 @@ try {
     Write-Section 'EXECUTION'
     Assert-StillSame $os $old $identity ([int64]$disk.Size)
     Assert-DiskLayoutSnapshot $partitionSnapshot
-    Write-Step 'Trying the standard reagentc /enable...'
-    & reagentc.exe /enable
-    $code = $LASTEXITCODE
-    $nowState = Get-ReInfo
-    if ($code -eq 0 -and $nowState.Status -eq 'Enabled') {
-        Write-Result 'SUCCESS: WinRE enabled without repartitioning.'
-        $script:Completed = $true
-        return
+    # When the Recovery partition is missing, a successful /enable may merely
+    # register WinRE on C:, defeating the approved goal of recreating Recovery.
+    if ($old) {
+        Write-Step 'Trying the standard reagentc /enable...'
+        & reagentc.exe /enable
+        $code = $LASTEXITCODE
+        $nowState = Get-ReInfo
+        if ($code -eq 0 -and $nowState.Status -eq 'Enabled') {
+            Write-Result 'SUCCESS: WinRE enabled without repartitioning.'
+            $script:Completed = $true
+            return
+        }
+        if ($nowState.Status -eq 'Enabled') {
+            throw 'reagentc returned an error but WinRE now reports Enabled. Manual inspection is required.'
+        }
+        Write-Notice 'Standard WinRE enable failed. Executing the approved recovery plan.'
+    } else {
+        Write-Step 'No Recovery partition exists. Proceeding with the approved creation plan.'
     }
-    if ($nowState.Status -eq 'Enabled') {
-        throw 'reagentc returned an error but WinRE now reports Enabled. Manual inspection is required.'
-    }
-    Write-Notice 'Standard WinRE enable failed. Executing the approved recovery plan.'
     Assert-StillSame $os $old $identity ([int64]$disk.Size)
     Assert-DiskLayoutSnapshot $partitionSnapshot
     if ($plan.Mode -eq 'InPlace') {
         $script:NewPartNumber = [int]$old.PartitionNumber
-        $script:TempLetter = $tmpLetter
         $script:Mutated = $true
-        Run-DiskPart @("select disk $script:DiskNumber", "select partition $script:NewPartNumber", "assign letter=$tmpLetter")
         $mountedPart = Get-Partition -DiskNumber $script:DiskNumber -PartitionNumber $script:NewPartNumber -ErrorAction Stop
-        if ([string]$mountedPart.DriveLetter -ine $tmpLetter -or $mountedPart.Offset -ne $old.Offset -or $mountedPart.Size -ne $old.Size) {
-            throw 'The existing Recovery partition could not be safely mounted.'
+        if ($mountedPart.Offset -ne $old.Offset -or $mountedPart.Size -ne $old.Size) {
+            throw 'The existing Recovery partition changed unexpectedly.'
         }
         Say "Formatting existing Recovery partition $script:NewPartNumber. Later partitions are untouched."
         Format-Volume -Partition $mountedPart -FileSystem NTFS -NewFileSystemLabel 'Windows RE tools' -Force -Confirm:$false -ErrorAction Stop | Out-Null
+        Open-RecoveryMount $script:NewPartNumber
     } else {
         if ($old) {
             Say "Deleting Recovery partition $($old.PartitionNumber)..."
@@ -676,7 +749,7 @@ try {
             if ($afterDelete.Count -ne 0) { throw 'Recovery partition was not removed; stopping.' }
         }
         if ($plan.TargetC -gt $os.Size) {
-            Say "Extending C: to $(SizeGiB $plan.TargetC)..."
+            Say "Extending C: to $(SizeGiBWithNtfsMargin $plan.TargetC)..."
             $supported = Get-PartitionSupportedSize -DiskNumber $script:DiskNumber -PartitionNumber $os.PartitionNumber -ErrorAction Stop
             if ($supported.SizeMax -lt $plan.TargetC) { throw 'Windows does not permit extending C: to the planned size.' }
             $script:Mutated = $true
@@ -689,26 +762,30 @@ try {
         Say "Creating NTFS Recovery: $(SizeMiB $plan.Recovery)..."
         $script:Mutated = $true
         if ([string]$disk.PartitionStyle -eq 'GPT') {
-            $created = New-Partition -DiskNumber $script:DiskNumber -Offset $offset -Size $plan.Recovery -DriveLetter $tmpLetter -GptType $script:BasicGuid -ErrorAction Stop
+            $created = New-Partition -DiskNumber $script:DiskNumber -Offset $offset -Size $plan.Recovery -GptType $script:BasicGuid -ErrorAction Stop
         } else {
-            $created = New-Partition -DiskNumber $script:DiskNumber -Offset $offset -Size $plan.Recovery -DriveLetter $tmpLetter -MbrType IFS -ErrorAction Stop
+            $created = New-Partition -DiskNumber $script:DiskNumber -Offset $offset -Size $plan.Recovery -MbrType IFS -ErrorAction Stop
         }
         $script:NewPartNumber = [int]$created.PartitionNumber
-        $script:TempLetter = $tmpLetter
         $new = Get-Partition -DiskNumber $script:DiskNumber -PartitionNumber $script:NewPartNumber
-        if ($new.Offset -ne $offset -or $new.Size -lt $plan.MinRecovery -or $new.Size -ne $plan.Recovery -or [string]$new.DriveLetter -ine $tmpLetter) {
+        if ($new.Offset -ne $offset -or $new.Size -lt $plan.MinRecovery -or $new.Size -ne $plan.Recovery) {
             throw 'Created Recovery does not match the planned layout.'
         }
+        if ($new.DriveLetter) {
+            throw 'Windows assigned an unexpected drive letter to Recovery; stopping before formatting.'
+        }
         Format-Volume -Partition $new -FileSystem NTFS -NewFileSystemLabel 'Windows RE tools' -Force -Confirm:$false -ErrorAction Stop | Out-Null
+        Open-RecoveryMount $script:NewPartNumber
     }
-    $targetDir = "$tmpLetter`:\Recovery\WindowsRE"
+    $targetDir = Join-Path $script:MountAccessPath 'Recovery\WindowsRE'
     New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
     $targetFile = Join-Path $targetDir 'Winre.wim'
     Copy-Item -LiteralPath $script:WimFile -Destination $targetFile -Force -ErrorAction Stop
     if ((Get-FileHash -LiteralPath $script:WimFile -Algorithm SHA256).Hash -ine (Get-FileHash -LiteralPath $targetFile -Algorithm SHA256).Hash) {
         throw 'Copied Winre.wim failed SHA-256 verification.'
     }
-    if ((Get-Volume -DriveLetter $tmpLetter).SizeRemaining -lt 250 * $script:MiB) { throw 'Fewer than 250 MiB remain after copying Winre.wim.' }
+    $newVolume = Get-Volume -Partition (Get-Partition -DiskNumber $script:DiskNumber -PartitionNumber $script:NewPartNumber) -ErrorAction Stop
+    if ($newVolume.SizeRemaining -lt 250 * $script:MiB) { throw 'Fewer than 250 MiB remain after copying Winre.wim.' }
     Say 'Registering and enabling WinRE...'
     Run-External 'reagentc.exe' @('/setreimage','/path',$targetDir)
     Run-External 'reagentc.exe' @('/enable')
@@ -717,6 +794,10 @@ try {
     if ($final.Output -notmatch "(?i)harddisk$script:DiskNumber\\partition$script:NewPartNumber(\\|\b)") {
         throw 'WinRE is enabled but its location could not be verified. Recovery type was not changed.'
     }
+    # Detach the temporary NTFS folder mount BEFORE changing GPT type.
+    # There is never a temporary drive letter in this workflow.
+    Write-Step 'Removing the temporary Recovery folder mount...'
+    Close-RecoveryMount
     if ($plan.Mode -eq 'Rebuild') {
         Say 'Applying GPT/MBR Recovery type and attributes...'
         Set-RecoveryType $script:NewPartNumber ([string]$disk.PartitionStyle)
@@ -749,11 +830,13 @@ try {
             $script:Mounted = $false
         } catch { Write-Warning "Failed to unmount the temporary DISM image: $_" }
     }
-    if ($script:TempLetter -and $null -ne $script:NewPartNumber -and $null -ne $script:DiskNumber) {
+    if ($script:MountAccessPath) {
         try {
-            # Remove the temporary letter even if the partition has become hidden.
-            Run-DiskPart @("select disk $script:DiskNumber", "select partition $script:NewPartNumber", "remove letter=$script:TempLetter")
-        } catch { Write-Warning "Failed to remove temporary drive letter $script:TempLetter`: $_" }
+            Close-RecoveryMount
+        } catch {
+            Write-Warning "Could not detach the temporary Recovery mount point $script:MountAccessPath`: $_"
+            Write-Warning 'The mount directory was deliberately retained to avoid deleting Recovery files.'
+        }
     }
     if ($script:WorkDir -and (Test-Path -LiteralPath $script:WorkDir -PathType Container)) {
         if ($script:Mutated -and -not $script:Completed) {
