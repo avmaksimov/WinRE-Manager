@@ -11,12 +11,12 @@
 
 Run **`WinRE-Manager.ps1`** (right-click → **Run with PowerShell**, or `& '.\WinRE-Manager.ps1'` from a PowerShell console). No script parameters are required. If administrator privileges are missing, it requests UAC and opens a separate elevated PowerShell window; the original interactive console stays open and is not terminated. `WinRE-Manager.ps1` waits for a keypress after finishing. The installer waits only when opened through Explorer; when invoked from an existing PowerShell/CMD/terminal session, it returns to the prompt without a keypress. On UAC approval, the non-elevated WinRE-Manager instance exits without an extra pause.
 
-Workflow: **analyze → show a proposed plan → one `Y/N` confirmation → execute**. Color-coded sections separate analysis, image selection, proposed actions, safety warnings, execution, and results. Any response other than `Y` cancels. There are no log files.
+Workflow: **analyze → show a proposed plan → one `Y/N` confirmation → execute**. Color-coded sections separate analysis, image selection, proposed actions, safety warnings, execution, and results. Labels and values are aligned in clearly spaced columns. Any response other than `Y` cancels. There are no log files.
 
 - When WinRE is already `Enabled`, no changes are performed, even if partition sizes could be optimized.
 - When WinRE is disabled, the tool searches for a usable local `Winre.wim` first. If none is found, it asks you to mount a matching Windows ISO and enter **one drive letter without a colon**, e.g. `F`.
 - The tool supports `sources\install.wim` and `sources\install.esd` on the ISO. It verifies the edition ID and architecture independently of Windows display language, and prefers an exact OS build. For Windows 11 24H2/25H2/26H2 (builds 26100/26200/26300), it also accepts a single edition- and architecture-matching image from the shared servicing-core family, with an explicit warning. It displays the ISO image editions, builds, and architectures for diagnosis, then stages `Winre.wim` on C: before any destructive work.
-- Before the final confirmation, it computes the Recovery minimum as `max(990 MiB, Winre.wim size + 250 MiB + 32 MiB)` and checks whether the disk layout is supported.
+- Before the final confirmation, it computes the Recovery minimum as `max(990 MiB, Winre.wim size + 250 MiB + 32 MiB)`, displays the actual system disk capacity and remaining unallocated space, and independently checks the planned C:/Recovery geometry in bytes. A plan extending beyond the disk or overlapping another partition is rejected before confirmation.
 - After approval, it first tries `reagentc /enable`; if that succeeds, no partition formatting or resizing is performed.
 
 ### Supported layouts and changes

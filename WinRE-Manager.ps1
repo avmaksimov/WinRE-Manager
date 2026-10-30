@@ -40,8 +40,9 @@ function Write-Section([string]$label) {
     Write-Host ("=== {0} ===" -f $label) -ForegroundColor Cyan
 }
 function Write-Detail([string]$label, [string]$value, [string]$color = 'White') {
-    Write-Host ("  {0,-17}" -f ($label + ':')) -ForegroundColor Gray -NoNewline
-    Write-Host $value -ForegroundColor $color
+    # A single console write prevents column gaps when output is copied or reflowed.
+    # The longest current label needs 17 characters, so 20 leaves clear spacing.
+    Write-Host ("  {0,-20}{1}" -f ($label + ':'), $value) -ForegroundColor $color
 }
 function Write-Notice([string]$message) {
     Write-Host ("  {0}" -f $message) -ForegroundColor Yellow
@@ -301,7 +302,8 @@ function Select-IsoIndex([string]$path, [string]$edition, [int]$build, [string]$
     }
     Write-Detail 'Selected image' ("index {0}, {1}, build {2}, {3}" -f $selected.Index, $selected.Edition, $selected.Build, $selected.Architecture) 'Green'
     if (-not $selected.Exact) {
-        Write-Notice ("ISO build {0} differs from installed build {1}; accepted because both use the Windows 11 24H2/25H2/26H2 servicing core." -f $selected.Build, $build)
+        Write-Notice ("ISO build {0} differs from installed build {1}." -f $selected.Build, $build)
+        Write-Notice 'Accepted: both builds belong to the Windows 11 24H2/25H2/26H2 servicing family.'
     }
     return [int]$selected.Index
 }
@@ -346,9 +348,53 @@ function Make-Plan($disk, $os, [int64]$minSize) {
     if ($targetRecovery -lt $minSize) { throw 'Calculated Recovery partition is smaller than the minimum.' }
     return [pscustomobject]@{ TargetC=$targetC; Recovery=$targetRecovery; MinRecovery=$minSize; MaxRecovery=$maxRecovery; Offset=[int64]($os.Offset + $targetC) }
 }
-function Assert-StillSame($os, $old, [string]$identity) {
+function Assert-PlanGeometry($disk, $os, $old, $plan) {
+    # Recheck all arithmetic in bytes before showing the destructive plan.
+    $diskSize = [int64]$disk.Size
+    $osStart = [int64]$os.Offset
+    $currentCEnd = [int64]($osStart + [int64]$os.Size)
+    if ($diskSize -le 0 -or $osStart -lt 0 -or $currentCEnd -gt $diskSize) {
+        throw 'Invalid system disk or C: geometry.'
+    }
+    if ([int64]$plan.TargetC -lt [int64]$os.Size -or [int64]$plan.MinRecovery -le 0 -or
+        [int64]$plan.Recovery -lt [int64]$plan.MinRecovery) {
+        throw 'Proposed partition sizes are invalid. No changes were made.'
+    }
+    if ($plan.Mode -eq 'Rebuild') {
+        $recoveryStart = [int64]($osStart + [int64]$plan.TargetC)
+        $recoveryEnd = [int64]($recoveryStart + [int64]$plan.Recovery)
+        $usableEnd = [int64]([math]::Floor(($diskSize - 4 * $script:MiB) / $script:MiB) * $script:MiB)
+        if ($recoveryStart -ne [int64]$plan.Offset -or $recoveryStart -lt $currentCEnd -or
+            $recoveryEnd -gt $usableEnd -or $recoveryEnd -le $recoveryStart -or
+            ($recoveryStart % $script:MiB) -ne 0 -or ($recoveryEnd % $script:MiB) -ne 0) {
+            throw ('Proposed C: and Recovery exceed available disk space or are misaligned. ' +
+                   'Disk: ' + (SizeGiB $diskSize) + '; planned end: ' + (SizeGiB $recoveryEnd) +
+                   '. No changes were made.')
+        }
+        if ([int64]$plan.Recovery -gt [int64]$plan.MaxRecovery) {
+            throw 'Proposed Recovery exceeds the approved maximum size.'
+        }
+        foreach ($part in @(Get-Partition -DiskNumber $script:DiskNumber -ErrorAction Stop)) {
+            if ([int]$part.PartitionNumber -eq [int]$os.PartitionNumber) { continue }
+            if ($old -and [int]$part.PartitionNumber -eq [int]$old.PartitionNumber) { continue }
+            $partStart = [int64]$part.Offset
+            $partEnd = [int64]($partStart + [int64]$part.Size)
+            if ($partStart -lt $recoveryEnd -and $partEnd -gt $currentCEnd) {
+                throw "Proposed Recovery would overlap partition $($part.PartitionNumber). No changes were made."
+            }
+        }
+    } else {
+        if (-not $old -or [int64]$plan.TargetC -ne [int64]$os.Size -or
+            [int64]$plan.Offset -ne [int64]$old.Offset -or
+            [int64]$plan.Recovery -ne [int64]$old.Size) {
+            throw 'In-place Recovery plan does not match the existing layout.'
+        }
+    }
+}
+function Assert-StillSame($os, $old, [string]$identity, [int64]$diskSize) {
     $nowDisk = Get-Disk -Number $script:DiskNumber -ErrorAction Stop
     if ([string]$nowDisk.UniqueId -ne $identity) { throw 'The disk identifier changed after analysis.' }
+    if ([int64]$nowDisk.Size -ne $diskSize) { throw 'The disk capacity changed after analysis.' }
     $nowC = Get-Partition -DiskNumber $script:DiskNumber -PartitionNumber $os.PartitionNumber -ErrorAction Stop
     if ($nowC.Offset -ne $os.Offset -or $nowC.Size -ne $os.Size -or [string]$nowC.DriveLetter -ine 'C') { throw 'The C: partition changed after analysis.' }
     if ($old) {
@@ -443,6 +489,7 @@ try {
     Write-Section 'WinRE-MANAGER / ANALYSIS'
     Write-Detail 'Windows' ("$edition, build $build, $arch")
     Write-Detail 'System disk' ("$script:DiskNumber ($($disk.PartitionStyle))")
+    Write-Detail 'Disk capacity' (SizeGiB ([int64]$disk.Size))
     Write-Detail 'C' (SizeGiB $os.Size)
     $statusColor = if ($state.Status -eq 'Enabled') { 'Green' } else { 'Yellow' }
     Write-Detail 'WinRE' $state.Status $statusColor
@@ -501,7 +548,8 @@ try {
         $plan = Make-Plan $disk $os $minSize
         $plan | Add-Member -NotePropertyName Mode -NotePropertyValue 'Rebuild'
     }
-    # Do not propose an unsafe layout if a preflight check already fails.
+    # Refuse impossible geometry before the user can approve a destructive change.
+    Assert-PlanGeometry $disk $os $old $plan
     $identity = [string]$disk.UniqueId
     $partitionSnapshot = @($parts | ForEach-Object {
         [pscustomobject]@{ PartitionNumber=$_.PartitionNumber; Offset=$_.Offset; Size=$_.Size }
@@ -510,11 +558,16 @@ try {
     Write-Section 'SUMMARY / PROPOSED PLAN'
     Write-Detail 'Image source' $sourceInfo
     Write-Detail 'Image size' (SizeMiB $imageSize)
+    Write-Detail 'Disk capacity' (SizeGiB ([int64]$disk.Size))
     Write-Detail 'C: current' (SizeGiB $os.Size)
     Write-Detail 'C: proposed' (SizeGiB $plan.TargetC) $(if ($plan.TargetC -gt $os.Size) { 'Yellow' } else { 'White' })
     Write-Detail 'Recovery current' $(if ($old) { SizeMiB $old.Size } else { 'none' })
     Write-Detail 'Recovery target' (SizeMiB $plan.Recovery) 'Yellow'
     Write-Detail 'Required minimum' (SizeMiB $plan.MinRecovery)
+    if ($plan.Mode -eq 'Rebuild') {
+        $unusedTail = [int64]($disk.Size - $plan.Offset - $plan.Recovery)
+        Write-Detail 'Unallocated after' (SizeMiB $unusedTail)
+    }
     Write-Host ''
     Write-Host '  Planned actions:' -ForegroundColor Gray
     Write-Step '1. Try reagentc /enable; stop without repartitioning if it succeeds.'
@@ -537,7 +590,7 @@ try {
     if ($decision -cne 'Y') { Write-Result 'Canceled. No system settings were changed.'; return }
 
     Write-Section 'EXECUTION'
-    Assert-StillSame $os $old $identity
+    Assert-StillSame $os $old $identity ([int64]$disk.Size)
     Assert-DiskLayoutSnapshot $partitionSnapshot
     Write-Step 'Trying the standard reagentc /enable...'
     & reagentc.exe /enable
@@ -552,7 +605,7 @@ try {
         throw 'reagentc returned an error but WinRE now reports Enabled. Manual inspection is required.'
     }
     Write-Notice 'Standard WinRE enable failed. Executing the approved recovery plan.'
-    Assert-StillSame $os $old $identity
+    Assert-StillSame $os $old $identity ([int64]$disk.Size)
     Assert-DiskLayoutSnapshot $partitionSnapshot
     if ($plan.Mode -eq 'InPlace') {
         $script:NewPartNumber = [int]$old.PartitionNumber
