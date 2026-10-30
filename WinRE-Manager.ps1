@@ -317,12 +317,16 @@ function Extract-IsoWinre([string]$source, [int]$index) {
     }
     New-Item -ItemType Directory -Path $script:MountDir -Force | Out-Null
     Write-Step 'Mounting installation image read-only...'
+    Write-Detail 'Mount directory' $script:MountDir
     Run-External 'dism.exe' @('/English','/Mount-Image',"/ImageFile:$image","/Index:$index","/MountDir:$script:MountDir",'/ReadOnly')
     $script:Mounted = $true
+    Write-Step 'Locating Winre.wim inside the mounted image...'
     $inside = Join-Path $script:MountDir 'Windows\System32\Recovery\Winre.wim'
     if (-not (Test-Path -LiteralPath $inside -PathType Leaf)) { throw 'The installation image does not contain Winre.wim.' }
+    Write-Step 'Copying Winre.wim out of the installation image...'
     Copy-Item -LiteralPath $inside -Destination $script:WimFile -Force -ErrorAction Stop
-    Write-Step 'Unmounting installation image...'
+    Write-Detail 'Temporary WinRE' $script:WimFile
+    Write-Step 'Unmounting installation image (the extracted Winre.wim is retained)...'
     Run-External 'dism.exe' @('/English','/Unmount-Image',"/MountDir:$script:MountDir",'/Discard')
     $script:Mounted = $false
 }
@@ -479,8 +483,10 @@ try {
         Extract-IsoWinre $install $index
         $sourceInfo = "ISO $letter`: (index $index)"
     }
-    if (-not (Test-Wim $script:WimFile)) { throw 'The extracted Winre.wim failed DISM validation.' }
+    Write-Step 'Validating the staged Winre.wim...'
+    if (-not (Test-Wim $script:WimFile)) { throw 'The staged Winre.wim failed DISM validation.' }
     $imageSize = [int64](Get-Item -LiteralPath $script:WimFile -Force).Length
+    Write-Detail 'WinRE image' ((SizeMiB $imageSize) + ' (validated)') 'Green'
     $minSize = [int64]([math]::Ceiling(([math]::Max(990 * $script:MiB, $imageSize + 250 * $script:MiB + 32 * $script:MiB)) / $script:MiB) * $script:MiB)
     if ($layoutMode -eq 'InPlace') {
         if ($old.Size -lt $minSize) {
